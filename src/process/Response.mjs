@@ -370,12 +370,52 @@ async function InjectAirQuality(airQuality, Settings, Caches, enviroments) {
     const injectedIndex = needInjectIndex ? await InjectIndex(injectedPollutants, Settings, enviroments) : injectedPollutants;
 
     // Step4. 计算昨日对比是否需要重算；若未知则注入昨日对比结果
-    const weatherKitComparison = airQuality?.previousDayComparison ?? AirQuality.Config.CompareCategoryIndexes.UNKNOWN;
-    const previousDayComparison = needInjectIndex && Settings?.AirQuality?.Comparison?.ReplaceWhenCurrentChange ? AirQuality.Config.CompareCategoryIndexes.UNKNOWN : weatherKitComparison;
-    const needInjectComparison = previousDayComparison === AirQuality.Config.CompareCategoryIndexes.UNKNOWN;
-    const currentIndexProvider = needInjectIndex ? Settings?.AirQuality?.Current?.Index?.Provider : "WeatherKit";
-    const injectedComparison = needInjectComparison ? await InjectComparison(injectedIndex, currentIndexProvider, Settings, Caches, enviroments) : { ...injectedIndex, previousDayComparison: weatherKitComparison };
+    const comparisonEnabled =
+    Settings?.AirQuality?.Comparison?.Enabled ?? true;
 
+    let needInjectComparison = false;
+    let injectedComparison;
+    
+    if (comparisonEnabled) {
+        const weatherKitComparison =
+            airQuality?.previousDayComparison ??
+            AirQuality.Config.CompareCategoryIndexes.UNKNOWN;
+    
+        const previousDayComparison =
+            needInjectIndex &&
+            Settings?.AirQuality?.Comparison?.ReplaceWhenCurrentChange
+                ? AirQuality.Config.CompareCategoryIndexes.UNKNOWN
+                : weatherKitComparison;
+    
+        needInjectComparison =
+            previousDayComparison ===
+            AirQuality.Config.CompareCategoryIndexes.UNKNOWN;
+    
+        const currentIndexProvider =
+            needInjectIndex
+                ? Settings?.AirQuality?.Current?.Index?.Provider
+                : "WeatherKit";
+    
+        injectedComparison =
+            needInjectComparison
+                ? await InjectComparison(
+                      injectedIndex,
+                      currentIndexProvider,
+                      Settings,
+                      Caches,
+                      enviroments
+                  )
+                : {
+                      ...injectedIndex,
+                      previousDayComparison: weatherKitComparison
+                  };
+    } else {
+        injectedComparison = {
+            ...injectedIndex,
+            previousDayComparison:
+                AirQuality.Config.CompareCategoryIndexes.UNKNOWN
+        };
+    }
     // Step5. 收集各阶段元数据，拼接最终 providerName 展示文案
     const weatherKitMetadata = airQuality?.metadata;
     const pollutantMetadata = injectedPollutants?.metadata;
