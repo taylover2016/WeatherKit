@@ -100,9 +100,8 @@ test("AirQualityScale resolves maintained language aliases through one builder",
     }
 });
 
-test("request keeps future datasets while removing a known explicitly disabled dataset", async () => {
-    const input = "airQuality,news,forecastPrecipitation,forecastNextHour,currentWeather";
-    const expected = ["airQuality", "news", "forecastPrecipitation", "currentWeather"];
+test("request preserves WeatherKit dataSets independently of the response processing switch", async () => {
+    const input = "airQuality,news,forecastPrecipitation,forecastNextHour,currentWeather,weatherAlerts";
 
     for (const handler of [Request, RequestDev]) {
         const request = {
@@ -111,7 +110,7 @@ test("request keeps future datasets while removing a known explicitly disabled d
             url: `https://weatherkit.apple.com/api/v2/weather/en-US/22.5431/114.0579?dataSets=${input}`,
         };
         const result = await handler(request);
-        assert.deepEqual(new URL(result.$request.url).searchParams.get("dataSets").split(","), expected);
+        assert.equal(new URL(result.$request.url).searchParams.get("dataSets"), input);
     }
 });
 
@@ -215,8 +214,23 @@ test("request only serves custom AQHI scales on an exact pathname match", async 
     }
 });
 
-test("only response-injectable datasets remain configurable", () => {
-    assert.deepEqual(database.WeatherKit.Settings.DataSets, ["airQuality", "currentWeather", "forecastDaily", "forecastHourly", "forecastNextHour"]);
+test("default processed datasets match the release configuration", () => {
+    assert.deepEqual(database.WeatherKit.Settings.DataSets, ["airQuality", "currentWeather", "forecastDaily", "forecastHourly", "forecastNextHour", "weatherAlerts"]);
+});
+
+test("request dataSet names map to FlatBuffer root slots", () => {
+    assert.deepEqual(database.WeatherKit.Configs.DataSets, {
+        airQuality: "airQuality",
+        currentWeather: "currentWeather",
+        forecastDaily: "forecastDaily",
+        forecastHourly: "forecastHourly",
+        forecastNextHour: "forecastNextHour",
+        news: "news",
+        weatherAlerts: "weatherAlerts",
+        weatherChange: "weatherChanges",
+        trendComparison: "historicalComparisons",
+        locationInfo: "locationInfo",
+    });
 });
 
 test("provider API defaults live in the database", () => {

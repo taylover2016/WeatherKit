@@ -52,8 +52,18 @@ export const output = {
 export const dataSets: Arg[] = [
     {
         key: "DataSets",
+        name: "[数据集]",
         defaultValue: ["airQuality", "currentWeather", "forecastDaily", "forecastHourly", "forecastNextHour", "weatherAlerts"],
         type: "array",
+        description: "选择需要解析并处理的数据集；未选择的数据槽始终保持原样透传，不作修改。",
+        options: [
+            { key: "airQuality", label: "空气质量" },
+            { key: "currentWeather", label: "当前天气" },
+            { key: "forecastDaily", label: "每日预报" },
+            { key: "forecastHourly", label: "每小时预报" },
+            { key: "forecastNextHour", label: "未来一小时降水强度" },
+            { key: "weatherAlerts", label: "天气预警" },
+        ],
     },
 ];
 
@@ -61,20 +71,20 @@ export const dataSetsFull: Arg[] = [
     {
         key: "DataSets",
         name: "[数据集]",
-        defaultValue: ["airQuality", "currentWeather", "forecastDaily", "forecastHourly", "forecastNextHour", "locationInfo", "news", "historicalComparisons", "weatherAlerts", "weatherChanges"],
+        defaultValue: ["airQuality", "currentWeather", "forecastDaily", "forecastHourly", "forecastNextHour", "news", "weatherAlerts", "weatherChange", "trendComparison", "locationInfo"],
         type: "array",
-        description: "选中的数据集会被包含在请求中。",
+        description: "选择需要解析并处理的数据集；未选择的数据槽始终保持原样透传，不作修改。",
         options: [
             { key: "airQuality", label: "空气质量" },
             { key: "currentWeather", label: "当前天气" },
             { key: "forecastDaily", label: "每日预报" },
             { key: "forecastHourly", label: "每小时预报" },
             { key: "forecastNextHour", label: "未来一小时降水强度" },
-            { key: "locationInfo", label: "位置信息" },
             { key: "news", label: "新闻" },
-            { key: "historicalComparisons", label: "历史对比" },
             { key: "weatherAlerts", label: "天气预警" },
-            { key: "weatherChanges", label: "天气变化" },
+            { key: "weatherChange", label: "天气变化" },
+            { key: "trendComparison", label: "历史对比" },
+            { key: "locationInfo", label: "位置信息" },
         ],
     },
 ];
@@ -82,8 +92,8 @@ export const dataSetsFull: Arg[] = [
 const weatherReplace: Arg = {
     key: "Weather.Replace",
     name: "[天气] 替换范围",
-    defaultValue: ["CN"],
-    type: "array",
+    defaultValue: "CN",
+    type: "string",
     description: "正则表达式，只替换指定地区的天气。",
 };
 
@@ -341,6 +351,7 @@ export const storage: Arg[] = [
         name: "[储存] 配置类型",
         defaultValue: "Argument",
         type: "string",
+        exclude: ["boxjs"],
         options: [
             { key: "Argument", label: "优先使用插件选项与模块参数等，由 $argument 传入的配置，$argument 不包含的设置项由 PersistentStore (BoxJs) 提供" },
             { key: "PersistentStore", label: "只使用来自 BoxJs 等，由 $persistentStore 提供的配置" },
