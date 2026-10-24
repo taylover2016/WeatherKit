@@ -1,0 +1,299 @@
+name: WeatherKit Stable Auto Deploy
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Redeploy current stable release even if it already has a production record"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: weatherkit-production
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  deployments: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM: NSRingo/WeatherKit
+      PATCH_REVISION: "1"
+      CLOUDFLARE_PROJECT: weatherkit
+      CLOUDFLARE_BRANCH: main
+      PRODUCTION_ENDPOINT: weatherkit-352.pages.dev
+
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Resolve latest stable upstream release
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG=$(gh api "repos/${UPSTREAM}/releases/latest" --jq '.tag_name')
+          CONTROL_TAG="weatherkit-prod-${TAG}-r${PATCH_REVISION}"
+          FORCE="${{ github.event.inputs.force || 'false' }}"
+
+          if gh release view "$CONTROL_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            RELEASE_EXISTS=true
+          else
+            RELEASE_EXISTS=false
+          fi
+
+          if [[ "$RELEASE_EXISTS" == "true" && "$FORCE" != "true" ]]; then
+            SHOULD_DEPLOY=false
+          else
+            SHOULD_DEPLOY=true
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "control_tag=$CONTROL_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"
+          echo "should_deploy=$SHOULD_DEPLOY" >> "$GITHUB_OUTPUT"
+
+          echo "Upstream stable: $TAG"
+          echo "Production record: $CONTROL_TAG"
+          echo "Deploy required: $SHOULD_DEPLOY"
+
+      - name: Stop when production is already current
+        if: steps.release.outputs.should_deploy != 'true'
+        run: echo "Production already records ${{ steps.release.outputs.control_tag }}; nothing to do."
+
+      - name: Clone exact upstream stable tag
+        if: steps.release.outputs.should_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone \
+            --depth 1 \
+            --branch "${{ steps.release.outputs.tag }}" \
+            "https://github.com/${UPSTREAM}.git" \
+            upstream
+
+      - name: Record upstream commit
+        if: steps.release.outputs.should_deploy == 'true'
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA=$(git -C upstream rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Upstream commit: $SHA"
+
+      - name: Create and apply minimal Comparison patch
+        if: steps.release.outputs.should_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/weatherkit-comparison.patch <<'PATCH'
+          --- a/src/process/Response.mjs
+          +++ b/src/process/Response.mjs
+          @@ -371,12 +371,17 @@
+               const needInjectIndex = needPollutants || Settings?.AirQuality?.Current?.Index?.Replace?.some(scaleName => AirQuality.ScaleMatches(airQuality?.scale, scaleName));
+               const injectedIndex = needInjectIndex ? await InjectIndex(injectedPollutants, Settings, enviroments) : injectedPollutants;
+           
+          -    // Step4. 计算昨日对比是否需要重算；若未知则注入昨日对比结果
+          +    // Step4. 计算昨日对比是否需要重算；若未知且 Comparison 启用则注入昨日对比结果
+          +    const comparisonEnabled = Settings?.AirQuality?.Comparison?.Enabled ?? true;
+               const weatherKitComparison = airQuality?.previousDayComparison ?? AirQuality.Config.CompareCategoryIndexes.UNKNOWN;
+               const previousDayComparison = needInjectIndex && Settings?.AirQuality?.Comparison?.ReplaceWhenCurrentChange ? AirQuality.Config.CompareCategoryIndexes.UNKNOWN : weatherKitComparison;
+          -    const needInjectComparison = previousDayComparison === AirQuality.Config.CompareCategoryIndexes.UNKNOWN;
+          +    const needInjectComparison = comparisonEnabled && previousDayComparison === AirQuality.Config.CompareCategoryIndexes.UNKNOWN;
+               const currentIndexProvider = needInjectIndex ? Settings?.AirQuality?.Current?.Index?.Provider : "WeatherKit";
+          -    const injectedComparison = needInjectComparison ? await InjectComparison(injectedIndex, currentIndexProvider, Settings, Caches, enviroments) : { ...injectedIndex, previousDayComparison: weatherKitComparison };
+          +    const injectedComparison = !comparisonEnabled
+          +        ? { ...injectedIndex, previousDayComparison: AirQuality.Config.CompareCategoryIndexes.UNKNOWN }
+          +        : needInjectComparison
+          +          ? await InjectComparison(injectedIndex, currentIndexProvider, Settings, Caches, enviroments)
+          +          : { ...injectedIndex, previousDayComparison: weatherKitComparison };
+           
+               // Step5. 收集各阶段元数据，拼接最终 providerName 展示文案
+               const weatherKitMetadata = airQuality?.metadata;
+          PATCH
+
+          # Strip the YAML indentation that protects the heredoc inside this workflow file.
+          sed -i 's/^          //' /tmp/weatherkit-comparison.patch
+
+          git -C upstream apply --check /tmp/weatherkit-comparison.patch
+          git -C upstream apply /tmp/weatherkit-comparison.patch
+          node --check upstream/src/process/Response.mjs
+          grep -Fq 'Settings?.AirQuality?.Comparison?.Enabled ?? true' upstream/src/process/Response.mjs
+
+      - name: Create release Override
+        if: steps.release.outputs.should_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+
+          cat > artifacts/iRingo-WeatherKit-Rewrite-Custom-v5.stoverride <<'OVERRIDE'
+          name: " iRingo: 🌤 WeatherKit (Rewrite · Custom v5)"
+          desc: |-
+            NSRingo WeatherKit stable backend with minimal custom patch.
+            Custom endpoint: weatherkit-352.pages.dev
+            AirQuality algorithm: WAQI_InstantCast_US
+            AirQuality comparison: disabled
+          openUrl: "http://boxjs.com/#/app/iRingo.WeatherKit"
+          author: |-
+            VirgilClyne
+            WordlessEcho
+            001
+            hhh2210
+            Custom deployment
+          homepage: "https://NSRingo.github.io/guide/Weather/weather-kit"
+          icon: "https://developer.apple.com/assets/elements/icons/weatherkit/weatherkit-128x128.png"
+          category: " iRingo"
+
+          rules:
+            - DOMAIN,weather-analytics-events.apple.com,REJECT-DROP
+            - DOMAIN-SUFFIX,tthr.apple.com,REJECT-DROP
+            - DOMAIN,tether.edge.apple,REJECT-DROP
+            - AND,((OR,((IP-ASN,714,no-resolve),(IP-ASN,6185,no-resolve))),(PROTOCOL,QUIC)),REJECT-DROP
+
+          http:
+            mitm:
+              - "weatherkit.apple.com"
+            url-rewrite:
+              - ^https?:\/\/weatherkit\.apple\.com\/api\/v1\/availability\/ https://weatherkit-352.pages.dev/weatherkit.apple.com/api/v1/availability/ transparent
+              - '^https?:\/\/weatherkit\.apple\.com\/api\/v2\/weather\/([^?]+)\?(.+)$ https://weatherkit-352.pages.dev/weatherkit.apple.com/api/v2/weather/$1?$2&AirQuality.Calculate.Algorithm=WAQI_InstantCast_US&AirQuality.Comparison.Enabled=false transparent'
+              - '^https?:\/\/weatherkit\.apple\.com\/api\/v2\/weather\/([^?]+)$ https://weatherkit-352.pages.dev/weatherkit.apple.com/api/v2/weather/$1?AirQuality.Calculate.Algorithm=WAQI_InstantCast_US&AirQuality.Comparison.Enabled=false transparent'
+              - ^https?:\/\/weatherkit\.apple\.com\/api\/v1\/weatherAlerts\?([^#]*&ids=[^&#]*-[0-9]{9}(?:&[^#]*)?)$ https://weatherkit-352.pages.dev/weatherkit.apple.com/api/v1/weatherAlerts?$1 transparent
+              - ^https?:\/\/weatherkit\.apple\.com\/api\/v1\/weatherAlerts\?([^#]*&ids=-?[0-9]+(?:\.[0-9]+)?,-?[0-9]+(?:\.[0-9]+)?(?:&[^#]*)?)$ https://weatherkit-352.pages.dev/weatherkit.apple.com/api/v1/weatherAlerts?$1 transparent
+          OVERRIDE
+
+          sed -i 's/^          //' artifacts/iRingo-WeatherKit-Rewrite-Custom-v5.stoverride
+
+          test -s artifacts/iRingo-WeatherKit-Rewrite-Custom-v5.stoverride
+          grep -Fq 'weatherkit-352.pages.dev' artifacts/iRingo-WeatherKit-Rewrite-Custom-v5.stoverride
+          grep -Fq 'AirQuality.Calculate.Algorithm=WAQI_InstantCast_US' artifacts/iRingo-WeatherKit-Rewrite-Custom-v5.stoverride
+          grep -Fq 'AirQuality.Comparison.Enabled=false' artifacts/iRingo-WeatherKit-Rewrite-Custom-v5.stoverride
+
+      - name: Install upstream dependencies
+        if: steps.release.outputs.should_deploy == 'true'
+        working-directory: upstream
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+
+      - name: Build upstream scripts
+        if: steps.release.outputs.should_deploy == 'true'
+        working-directory: upstream
+        run: npm run build
+
+      - name: Compile Pages Functions as deployment gate
+        if: steps.release.outputs.should_deploy == 'true'
+        working-directory: upstream
+        run: npx --yes wrangler@4 pages functions build functions --outfile=.weatherkit-pages-worker.js
+
+      - name: Prepare immutable backup artifacts
+        if: steps.release.outputs.should_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.release.outputs.tag }}'
+          SHA='${{ steps.upstream.outputs.sha }}'
+
+          tar \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.weatherkit-pages-worker.js' \
+            -czf "artifacts/WeatherKit-${TAG}-r${PATCH_REVISION}-patched-source.tar.gz" \
+            -C upstream .
+
+          jq -n \
+            --arg upstream "$UPSTREAM" \
+            --arg tag "$TAG" \
+            --arg commit "$SHA" \
+            --argjson patch_revision "$PATCH_REVISION" \
+            --arg endpoint "$PRODUCTION_ENDPOINT" \
+            --arg workflow "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{
+              upstream: $upstream,
+              tag: $tag,
+              commit: $commit,
+              patch_revision: $patch_revision,
+              production_endpoint: $endpoint,
+              workflow: $workflow
+            }' > artifacts/manifest.json
+
+          (cd artifacts && sha256sum * > SHA256SUMS.txt)
+
+          cat > artifacts/release-notes.md <<NOTES
+          Automated WeatherKit production deployment record.
+
+          - Upstream: $UPSTREAM
+          - Stable tag: $TAG
+          - Upstream commit: $SHA
+          - Custom patch revision: $PATCH_REVISION
+          - Production endpoint: $PRODUCTION_ENDPOINT
+          - Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          Production was built from the clean upstream stable tag and the minimal Response.mjs Comparison-disable patch. The Stash Override carries WAQI_InstantCast_US and Comparison.Enabled=false as request parameters.
+          NOTES
+
+      - name: Deploy directly to existing Cloudflare Pages production
+        if: steps.release.outputs.should_deploy == 'true'
+        working-directory: upstream
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4 pages deploy pages \
+            --project-name="$CLOUDFLARE_PROJECT" \
+            --branch="$CLOUDFLARE_BRANCH"
+
+      - name: Create or refresh GitHub production release record
+        if: steps.release.outputs.should_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONTROL_TAG='${{ steps.release.outputs.control_tag }}'
+          TITLE="WeatherKit Production ${{ steps.release.outputs.tag }} · patch r${PATCH_REVISION}"
+
+          if [[ '${{ steps.release.outputs.release_exists }}' == 'true' ]]; then
+            gh release edit "$CONTROL_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --notes-file artifacts/release-notes.md
+            gh release upload "$CONTROL_TAG" artifacts/manifest.json artifacts/SHA256SUMS.txt artifacts/*.stoverride artifacts/*.tar.gz \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$CONTROL_TAG" \
+              artifacts/manifest.json artifacts/SHA256SUMS.txt artifacts/*.stoverride artifacts/*.tar.gz \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes-file artifacts/release-notes.md \
+              --latest=false
+          fi
+
+      - name: Deployment summary
+        if: steps.release.outputs.should_deploy == 'true'
+        shell: bash
+        run: |
+          {
+            echo "### WeatherKit production updated"
+            echo "- Upstream: \`${{ steps.release.outputs.tag }}\`"
+            echo "- Commit: \`${{ steps.upstream.outputs.sha }}\`"
+            echo "- Patch revision: \`${PATCH_REVISION}\`"
+            echo "- Release record: \`${{ steps.release.outputs.control_tag }}\`"
+            echo "- Production: https://${PRODUCTION_ENDPOINT}"
+          } >> "$GITHUB_STEP_SUMMARY"
