@@ -26,7 +26,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       UPSTREAM: NSRingo/WeatherKit
-      PATCH_REVISION: "2"
+      PATCH_REVISION: "3"
       CLOUDFLARE_PROJECT: weatherkit
       CLOUDFLARE_BRANCH: main
       PRODUCTION_ENDPOINT: weatherkit-352.pages.dev
@@ -94,7 +94,7 @@ jobs:
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "Upstream commit: $SHA"
 
-      - name: Create and apply minimal Comparison patch
+      - name: Apply fixed US AQI production policy
         if: steps.release.outputs.should_deploy == 'true'
         shell: bash
         run: |
@@ -103,10 +103,22 @@ jobs:
           cat > /tmp/weatherkit-comparison.patch <<'PATCH'
           --- a/src/process/Response.mjs
           +++ b/src/process/Response.mjs
-          @@ -371,12 +371,17 @@
+          @@ -371,12 +371,29 @@
+          +    // Custom deployment policy: force US AQI after Settings resolution.
+          +    // This intentionally overrides URL/BoxJs/database precedence.
+          +    Settings.AirQuality ??= {};
+          +    Settings.AirQuality.Current ??= {};
+          +    Settings.AirQuality.Current.Index ??= {};
+          +    Settings.AirQuality.Current.Index.Provider = "Calculate";
+          +    Settings.AirQuality.Current.Index.Replace = ["EU.EAQI", "HJ6332012"];
+          +    Settings.AirQuality.Calculate ??= {};
+          +    Settings.AirQuality.Calculate.Algorithm = "WAQI_InstantCast_US";
+          +    Settings.AirQuality.Comparison ??= {};
+          +    Settings.AirQuality.Comparison.Enabled = false;
+          +
                const needInjectIndex = needPollutants || Settings?.AirQuality?.Current?.Index?.Replace?.some(scaleName => AirQuality.ScaleMatches(airQuality?.scale, scaleName));
                const injectedIndex = needInjectIndex ? await InjectIndex(injectedPollutants, Settings, enviroments) : injectedPollutants;
-           
+
           -    // Step4. 计算昨日对比是否需要重算；若未知则注入昨日对比结果
           +    // Step4. 计算昨日对比是否需要重算；若未知且 Comparison 启用则注入昨日对比结果
           +    const comparisonEnabled = Settings?.AirQuality?.Comparison?.Enabled ?? true;
@@ -121,7 +133,7 @@ jobs:
           +        : needInjectComparison
           +          ? await InjectComparison(injectedIndex, currentIndexProvider, Settings, Caches, enviroments)
           +          : { ...injectedIndex, previousDayComparison: weatherKitComparison };
-           
+
                // Step5. 收集各阶段元数据，拼接最终 providerName 展示文案
                const weatherKitMetadata = airQuality?.metadata;
           PATCH
@@ -132,6 +144,10 @@ jobs:
           git -C upstream apply --check /tmp/weatherkit-comparison.patch
           git -C upstream apply /tmp/weatherkit-comparison.patch
           node --check upstream/src/process/Response.mjs
+          grep -Fq 'Settings.AirQuality.Current.Index.Provider = "Calculate"' upstream/src/process/Response.mjs
+          grep -Fq 'Settings.AirQuality.Current.Index.Replace = ["EU.EAQI", "HJ6332012"]' upstream/src/process/Response.mjs
+          grep -Fq 'Settings.AirQuality.Calculate.Algorithm = "WAQI_InstantCast_US"' upstream/src/process/Response.mjs
+          grep -Fq 'Settings.AirQuality.Comparison.Enabled = false' upstream/src/process/Response.mjs
           grep -Fq 'Settings?.AirQuality?.Comparison?.Enabled ?? true' upstream/src/process/Response.mjs
 
       - name: Create release Override
@@ -247,7 +263,7 @@ jobs:
           - Production endpoint: $PRODUCTION_ENDPOINT
           - Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
 
-          Production was built from the clean upstream stable tag and the minimal Response.mjs Comparison-disable patch. The Stash Override explicitly replaces EU.EAQI with the iRingo Calculate provider using WAQI_InstantCast_US, forces Argument storage precedence, and disables comparison.
+          Production was built from the clean upstream stable tag with a server-side fixed US AQI policy. Response.mjs forces Calculate + WAQI_InstantCast_US for EU.EAQI/HJ6332012 and disables comparison after Settings resolution; the existing v6 Stash Override remains compatible.
           NOTES
 
       - name: Deploy directly to existing Cloudflare Pages production
